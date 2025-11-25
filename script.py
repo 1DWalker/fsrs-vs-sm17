@@ -36,11 +36,10 @@ def _initialize_referee_state():
 
 tqdm.pandas()
 
-
 def compute_adversarial_predictions(revlogs, algorithms, bins=10):
     """Causal adversary that minimizes expected Universal Metric per prefix."""
 
-    if "R (ADVERSARIAL)" in revlogs.columns:
+    if "R (ADVERSARIAL-UM)" in revlogs.columns:
         return revlogs
 
     base_cols = [f"R ({algo})" for algo in algorithms]
@@ -166,7 +165,201 @@ def compute_adversarial_predictions(revlogs, algorithms, bins=10):
             )
             state["total_count"] += 1
 
-    revlogs["R (ADVERSARIAL)"] = adversarial_series.astype(float)
+    revlogs["R (ADVERSARIAL-UM)"] = adversarial_series.astype(float)
+    return revlogs
+
+
+def compute_adversarial_um_plus_predictions(revlogs, algorithms, bins=10):
+    """Causal adversary that minimizes expected Universal Metric per prefix."""
+
+    if "R (ADVERSARIAL-UM+)" in revlogs.columns:
+        return revlogs
+
+    base_cols = [f"R ({algo})" for algo in algorithms]
+    missing_cols = [col for col in base_cols if col not in revlogs.columns]
+    if missing_cols:
+        raise KeyError(
+            "Missing prediction columns required for adversarial computation: "
+            + ", ".join(missing_cols)
+        )
+
+    BASE_ALGO = "FSRS-6"
+    if f"R ({BASE_ALGO})" not in revlogs.columns:
+        raise KeyError(f"Expected column 'R ({BASE_ALGO})' to estimate label probabilities")
+
+    order_column = "index" if "index" in revlogs.columns else None
+    ordered_indices = (
+        revlogs.sort_values(order_column).index
+        if order_column is not None
+        else revlogs.index
+    )
+
+    referee_states = {algo: _initialize_referee_state() for algo in algorithms}
+    candidate_ps = np.linspace(0.0, 1.0, 101)
+    adversarial_series = pd.Series(index=revlogs.index, dtype=float)
+
+    def project_average_um_plus_batch(labels, predictions, row, algorithms, referee_states, bins):
+        """
+        Fully vectorized (Option A): 
+        - Computes UM for each (label[i], prediction[i]) independently.
+        - Reads referee_states but does NOT update them.
+        - Returns UM array of shape (N,).
+        """
+
+        labels = np.asarray(labels)            # (N,)
+        predictions = np.asarray(predictions)  # (N,)
+        N = len(labels)
+
+        # Output UM per-sample
+        um = np.zeros(N, dtype=float)
+
+        # Precompute clipped R(algo)
+        algo_values = np.array([
+            float(np.clip(row[f"R ({algo})"], 0.0, 1.0))
+            for algo in algorithms
+        ])  # shape (A,)
+
+        for ai, algo in enumerate(algorithms):
+            value = algo_values[ai]
+            state = referee_states[algo]
+
+            # 1) Vectorized bin index
+            diffs = predictions - value
+            bin_ids = np.round(get_bin(diffs, bins) * bins).astype(int)   # (N,)
+
+            # 2) Pre-allocate result for this algo
+            algo_um = np.zeros(N, dtype=float)
+
+            # 3) Build lookup arrays for count, sum_y, sum_p for each bin id
+            # Gather statistics for all samples in one pass
+            counts   = np.zeros(N, dtype=float)
+            sum_y    = np.zeros(N, dtype=float)
+            sum_p    = np.zeros(N, dtype=float)
+
+            # vectorized dictionary gather
+            # (cannot truly vectorize dict lookup, but do a single python loop,
+            #  which is O(unique_bins) not O(N))
+            unique_bins, inv = np.unique(bin_ids, return_inverse=True)
+
+            # Prepare arrays for unique bins
+            u_counts = np.zeros(len(unique_bins), dtype=float)
+            u_sum_y  = np.zeros(len(unique_bins), dtype=float)
+            u_sum_p  = np.zeros(len(unique_bins), dtype=float)
+
+            for j, b in enumerate(unique_bins):
+                stats = state["bins"].get(int(b))
+                if stats:
+                    u_counts[j] = stats["count"]
+                    u_sum_y[j] = stats["sum_y"]
+                    u_sum_p[j] = stats["sum_p"]
+
+            # Map back to per-sample
+            counts = u_counts[inv]
+            sum_y = u_sum_y[inv]
+            sum_p = u_sum_p[inv]
+
+            # 4) Compute old contribution (vectorized)
+            nonzero = counts > 0
+            mean_y = np.zeros(N)
+            mean_p = np.zeros(N)
+            mean_y[nonzero] = sum_y[nonzero] / counts[nonzero]
+            mean_p[nonzero] = sum_p[nonzero] / counts[nonzero]
+
+            old_contrib = np.zeros(N)
+            old_contrib[nonzero] = counts[nonzero] * (mean_y[nonzero] - mean_p[nonzero])**2
+
+            # 5) Compute NEW stats (per-sample, vectorized)
+            new_count = counts + 1
+            new_sum_y = sum_y + labels
+            new_sum_p = sum_p + predictions
+            mean_delta = new_sum_y / new_count - new_sum_p / new_count
+            new_contrib = new_count * mean_delta**2
+
+            # 6) Compute new numerator & UM for this algo (vectorized)
+            numerator0 = state["numerator"]
+            total_count0 = state["total_count"]
+
+            new_numerator = numerator0 - old_contrib + new_contrib
+            new_total_count = total_count0 + 1
+
+            algo_um = np.sqrt(np.maximum(new_numerator, 0.0) / new_total_count)
+
+            # 7) Take per-sample max across algorithms
+            um = np.maximum(um, algo_um)
+
+        return um
+
+
+    for idx in tqdm(ordered_indices, smoothing=0.01):
+        row = revlogs.loc[idx]
+        raw_g = row.get(f"R ({BASE_ALGO})", 0.5)
+        g = float(np.clip(raw_g if np.isfinite(raw_g) else 0.5, 0.0, 1.0))
+        
+        # Vectorized UM for label = 1
+        um_one = project_average_um_plus_batch(
+            labels=np.ones_like(candidate_ps),
+            predictions=candidate_ps,
+            row=row,
+            algorithms=algorithms,
+            referee_states=referee_states,
+            bins=bins,
+        )
+
+        # Vectorized UM for label = 0
+        um_zero = project_average_um_plus_batch(
+            labels=np.zeros_like(candidate_ps),
+            predictions=candidate_ps,
+            row=row,
+            algorithms=algorithms,
+            referee_states=referee_states,
+            bins=bins,
+        )
+
+        # Expected UM for each p
+        expected_um = g * um_one + (1 - g) * um_zero  # shape (101,)
+
+        # Find best p
+        p_idx = np.argmin(expected_um)
+        best_p = float(candidate_ps[p_idx])
+        best_score = float(expected_um[p_idx])
+
+        adversarial_series.at[idx] = best_p
+        actual_y = float(row["y"])
+
+        for algo in algorithms:
+            state = referee_states[algo]
+            value = row[f"R ({algo})"]
+            value = float(np.clip(value if np.isfinite(value) else 0.5, 0.0, 1.0))
+            bin_idx = int(round(get_bin(best_p - value, bins) * bins))
+            stats = state["bins"][bin_idx]
+            if not stats:
+                stats["count"] = 0
+                stats["sum_y"] = 0.0
+                stats["sum_p"] = 0.0
+            prev_count = stats["count"]
+            prev_sum_y = stats["sum_y"]
+            prev_sum_p = stats["sum_p"]
+            if prev_count:
+                prev_mean_y = prev_sum_y / prev_count
+                prev_mean_p = prev_sum_p / prev_count
+                old_contribution = prev_count * (prev_mean_y - prev_mean_p) ** 2
+            else:
+                old_contribution = 0.0
+
+            stats["count"] = prev_count + 1
+            stats["sum_y"] = prev_sum_y + actual_y
+            stats["sum_p"] = prev_sum_p + best_p
+
+            new_count = stats["count"]
+            mean_delta = (stats["sum_y"] / new_count) - (stats["sum_p"] / new_count)
+            new_contribution = new_count * mean_delta**2
+
+            state["numerator"] = (
+                state["numerator"] - old_contribution + new_contribution
+            )
+            state["total_count"] += 1
+
+    revlogs["R (ADVERSARIAL-UM+)"] = adversarial_series.astype(float)
     return revlogs
 
 
@@ -643,14 +836,26 @@ def evaluate(revlogs):
     ]
 
     compute_adversarial_predictions(revlogs, base_algorithms)
+    compute_adversarial_um_plus_predictions(revlogs, base_algorithms)
 
-    algorithms = base_algorithms + ["ADVERSARIAL"]
+    # algorithms_UM = base_algorithms + ["ADVERSARIAL-UM"]
+    # for i, algoA in enumerate(algorithms_UM):
+    #     for algoB in algorithms_UM[i + 1 :]:
+    #         um_result = calculate_universal_metric(algoA, algoB)
+    #         universal_metrics.update(um_result)
 
+    # algorithms_UM_plus = base_algorithms + ["ADVERSARIAL-UM+"]
+    # for i, algoA in enumerate(algorithms_UM_plus):
+    #     for algoB in algorithms_UM_plus[i + 1 :]:
+    #         um_plus_result = calculate_universal_metric_plus(algoA, algoB)
+    #         universal_metric_plus.update(um_plus_result)
+
+    algorithms = base_algorithms + ["ADVERSARIAL-UM", "ADVERSARIAL-UM+"]
     for i, algoA in enumerate(algorithms):
         for algoB in algorithms[i + 1 :]:
             um_result = calculate_universal_metric(algoA, algoB)
-            um_plus_result = calculate_universal_metric_plus(algoA, algoB)
             universal_metrics.update(um_result)
+            um_plus_result = calculate_universal_metric_plus(algoA, algoB)
             universal_metric_plus.update(um_plus_result)
 
     # Original metrics calculation
@@ -664,7 +869,7 @@ def evaluate(revlogs):
             ["card_id", "r_history", "t_history", "delta_t", "i", "y", "R (MOVING-AVG)"]
         ].rename(columns={"R (MOVING-AVG)": "p"})
     )
-    adversarial_rmse = rmse_matrix(
+    adversarial_um_rmse = rmse_matrix(
         revlogs[
             [
                 "card_id",
@@ -673,9 +878,22 @@ def evaluate(revlogs):
                 "delta_t",
                 "i",
                 "y",
-                "R (ADVERSARIAL)",
+                "R (ADVERSARIAL-UM)",
             ]
-        ].rename(columns={"R (ADVERSARIAL)": "p"})
+        ].rename(columns={"R (ADVERSARIAL-UM)": "p"})
+    )
+    adversarial_um_plus_rmse = rmse_matrix(
+        revlogs[
+            [
+                "card_id",
+                "r_history",
+                "t_history",
+                "delta_t",
+                "i",
+                "y",
+                "R (ADVERSARIAL-UM+)",
+            ]
+        ].rename(columns={"R (ADVERSARIAL-UM+)": "p"})
     )
     sm16_rmse = rmse_matrix(
         revlogs[
@@ -727,7 +945,8 @@ def evaluate(revlogs):
     )
     avg_logloss = log_loss(revlogs["y"], revlogs["R (AVG)"])
     moving_avg_logloss = log_loss(revlogs["y"], revlogs["R (MOVING-AVG)"])
-    adversarial_logloss = log_loss(revlogs["y"], revlogs["R (ADVERSARIAL)"])
+    adversarial_um_logloss = log_loss(revlogs["y"], revlogs["R (ADVERSARIAL-UM)"])
+    adversarial_um_plus_logloss = log_loss(revlogs["y"], revlogs["R (ADVERSARIAL-UM+)"])
     sm16_logloss = log_loss(revlogs["y"], revlogs["R (SM16)"])
     sm17_logloss = log_loss(revlogs["y"], revlogs["R (SM17)"])
     fsrs_v6_logloss = log_loss(revlogs["y"], revlogs["R (FSRS-6)"])
@@ -739,7 +958,8 @@ def evaluate(revlogs):
 
     avg_auc = roc_auc_score(revlogs["y"], revlogs["R (AVG)"])
     moving_avg_auc = roc_auc_score(revlogs["y"], revlogs["R (MOVING-AVG)"])
-    adversarial_auc = roc_auc_score(revlogs["y"], revlogs["R (ADVERSARIAL)"])
+    adversarial_um_auc = roc_auc_score(revlogs["y"], revlogs["R (ADVERSARIAL-UM)"])
+    adversarial_um_plus_auc = roc_auc_score(revlogs["y"], revlogs["R (ADVERSARIAL-UM+)"])
     sm16_auc = roc_auc_score(revlogs["y"], revlogs["R (SM16)"])
     sm17_auc = roc_auc_score(revlogs["y"], revlogs["R (SM17)"])
     fsrs_v6_auc = roc_auc_score(revlogs["y"], revlogs["R (FSRS-6)"])
@@ -795,10 +1015,15 @@ def evaluate(revlogs):
             "LogLoss": round(moving_avg_logloss, 4),
             "AUC": round(moving_avg_auc, 4),
         },
-        "ADVERSARIAL": {
-            "RMSE(bins)": round(adversarial_rmse, 4),
-            "LogLoss": round(adversarial_logloss, 4),
-            "AUC": round(adversarial_auc, 4),
+        "ADVERSARIAL-UM": {
+            "RMSE(bins)": round(adversarial_um_rmse, 4),
+            "LogLoss": round(adversarial_um_logloss, 4),
+            "AUC": round(adversarial_um_auc, 4),
+        },
+        "ADVERSARIAL-UM+": {
+            "RMSE(bins)": round(adversarial_um_plus_rmse, 4),
+            "LogLoss": round(adversarial_um_plus_logloss, 4),
+            "AUC": round(adversarial_um_plus_auc, 4),
         },
         "FSRS-6-default": {
             "RMSE(bins)": round(fsrs_v6_default_rmse, 4),
