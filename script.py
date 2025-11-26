@@ -835,21 +835,8 @@ def evaluate(revlogs):
     ]
 
     compute_adversarial_predictions(revlogs, base_algorithms)
-    compute_adversarial_um_plus_predictions(revlogs, base_algorithms)
 
-    # algorithms_UM = base_algorithms + ["ADVERSARIAL-UM"]
-    # for i, algoA in enumerate(algorithms_UM):
-    #     for algoB in algorithms_UM[i + 1 :]:
-    #         um_result = calculate_universal_metric(algoA, algoB)
-    #         universal_metrics.update(um_result)
-
-    # algorithms_UM_plus = base_algorithms + ["ADVERSARIAL-UM+"]
-    # for i, algoA in enumerate(algorithms_UM_plus):
-    #     for algoB in algorithms_UM_plus[i + 1 :]:
-    #         um_plus_result = calculate_universal_metric_plus(algoA, algoB)
-    #         universal_metric_plus.update(um_plus_result)
-
-    algorithms = base_algorithms + ["ADVERSARIAL-UM", "ADVERSARIAL-UM+"]
+    algorithms = base_algorithms + ["ADVERSARIAL-UM"]
     for i, algoA in enumerate(algorithms):
         for algoB in algorithms[i + 1 :]:
             um_result = calculate_universal_metric(algoA, algoB)
@@ -880,19 +867,6 @@ def evaluate(revlogs):
                 "R (ADVERSARIAL-UM)",
             ]
         ].rename(columns={"R (ADVERSARIAL-UM)": "p"})
-    )
-    adversarial_um_plus_rmse = rmse_matrix(
-        revlogs[
-            [
-                "card_id",
-                "r_history",
-                "t_history",
-                "delta_t",
-                "i",
-                "y",
-                "R (ADVERSARIAL-UM+)",
-            ]
-        ].rename(columns={"R (ADVERSARIAL-UM+)": "p"})
     )
     sm16_rmse = rmse_matrix(
         revlogs[
@@ -950,7 +924,6 @@ def evaluate(revlogs):
     avg_logloss = log_loss(revlogs["y"], revlogs["R (AVG)"])
     moving_avg_logloss = log_loss(revlogs["y"], revlogs["R (MOVING-AVG)"])
     adversarial_um_logloss = log_loss(revlogs["y"], revlogs["R (ADVERSARIAL-UM)"])
-    adversarial_um_plus_logloss = log_loss(revlogs["y"], revlogs["R (ADVERSARIAL-UM+)"])
     sm16_logloss = log_loss(revlogs["y"], revlogs["R (SM16)"])
     sm17_logloss = log_loss(revlogs["y"], revlogs["R (SM17)"])
     fsrs_v6_logloss = log_loss(revlogs["y"], revlogs["R (FSRS-6)"])
@@ -964,7 +937,6 @@ def evaluate(revlogs):
     avg_auc = roc_auc_score(revlogs["y"], revlogs["R (AVG)"])
     moving_avg_auc = roc_auc_score(revlogs["y"], revlogs["R (MOVING-AVG)"])
     adversarial_um_auc = roc_auc_score(revlogs["y"], revlogs["R (ADVERSARIAL-UM)"])
-    adversarial_um_plus_auc = roc_auc_score(revlogs["y"], revlogs["R (ADVERSARIAL-UM+)"])
     sm16_auc = roc_auc_score(revlogs["y"], revlogs["R (SM16)"])
     sm17_auc = roc_auc_score(revlogs["y"], revlogs["R (SM17)"])
     fsrs_v6_auc = roc_auc_score(revlogs["y"], revlogs["R (FSRS-6)"])
@@ -1030,11 +1002,6 @@ def evaluate(revlogs):
             "RMSE(bins)": round(adversarial_um_rmse, 4),
             "LogLoss": round(adversarial_um_logloss, 4),
             "AUC": round(adversarial_um_auc, 4),
-        },
-        "ADVERSARIAL-UM+": {
-            "RMSE(bins)": round(adversarial_um_plus_rmse, 4),
-            "LogLoss": round(adversarial_um_plus_logloss, 4),
-            "AUC": round(adversarial_um_plus_auc, 4),
         },
         "FSRS-6-default": {
             "RMSE(bins)": round(fsrs_v6_default_rmse, 4),

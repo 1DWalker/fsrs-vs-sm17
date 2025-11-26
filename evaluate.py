@@ -99,7 +99,6 @@ if __name__ == "__main__":
     AVG = ("AVG", [])
     MOVING_AVG = ("MOVING-AVG", [])
     ADVERSARIAL_UM = ("ADVERSARIAL-UM", [])
-    ADVERSARIAL_UM_plus = ("ADVERSARIAL-UM+", [])
     sizes = []
     result_dir = pathlib.Path("./result")
     result_files = result_dir.glob("*.json")
@@ -120,8 +119,6 @@ if __name__ == "__main__":
             sizes.append(result["size"])
             if "ADVERSARIAL-UM" in result:
                 ADVERSARIAL_UM[1].append(result["ADVERSARIAL-UM"])
-            if "ADVERSARIAL-UM+" in result:
-                ADVERSARIAL_UM_plus[1].append(result["ADVERSARIAL-UM+"])
 
     print(f"Total users: {len(sizes)}")
     sizes = np.array(sizes)
@@ -155,11 +152,6 @@ if __name__ == "__main__":
         print(
             "Skipping adversarial aggregate metrics: result count mismatch with sizes."
         )
-    if len(ADVERSARIAL_UM_plus[1]) == len(sizes):
-        models.append(ADVERSARIAL_UM_plus)
-    else:
-        print("Skipping adversarial-um+")
-
     for scale_name, size in [
         ("Weighted by number of repetitions", np.array(sizes)),
         ("Unweighted (per user)", np.ones_like(sizes)),
