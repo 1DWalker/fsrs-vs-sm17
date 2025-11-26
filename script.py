@@ -1,6 +1,7 @@
 import collections
 import pandas as pd
 import matplotlib.pyplot as plt
+from lstm import run_lstm
 import numpy as np
 import torch
 import json
@@ -169,7 +170,7 @@ def compute_adversarial_predictions(revlogs, algorithms, bins=10):
     return revlogs
 
 
-def compute_adversarial_um_plus_predictions(revlogs, algorithms, bins=10):
+def compute_adversarial_um_plus_predictions(revlogs, algorithms, bins=20):
     """Causal adversary that minimizes expected Universal Metric per prefix."""
 
     if "R (ADVERSARIAL-UM+)" in revlogs.columns:
@@ -183,7 +184,7 @@ def compute_adversarial_um_plus_predictions(revlogs, algorithms, bins=10):
             + ", ".join(missing_cols)
         )
 
-    BASE_ALGO = "FSRS-6"
+    BASE_ALGO = "LSTM"
     if f"R ({BASE_ALGO})" not in revlogs.columns:
         raise KeyError(f"Expected column 'R ({BASE_ALGO})' to estimate label probabilities")
 
@@ -195,7 +196,7 @@ def compute_adversarial_um_plus_predictions(revlogs, algorithms, bins=10):
     )
 
     referee_states = {algo: _initialize_referee_state() for algo in algorithms}
-    candidate_ps = np.linspace(0.0, 1.0, 101)
+    candidate_ps = np.linspace(0.0, 1.0, 201)
     adversarial_series = pd.Series(index=revlogs.index, dtype=float)
 
     def project_average_um_plus_batch(labels, predictions, row, algorithms, referee_states, bins):
@@ -790,12 +791,9 @@ def evaluate(revlogs):
                 cross_comparison_record[f"R ({algo})"] - cross_comparison_record["y"]
             )
             cross_comparison_record["R_diff"] = cross_comparison_record[f"R ({algoA})"] - cross_comparison_record[f"R ({algoB})"]
-            cross_comparison_record[f"{algo}_bin"] = pd.qcut(
-                cross_comparison_record["R_diff"],
-                q=10,                # deciles
-                labels=False,        # gives bins 0–9
-                duplicates="drop"    # handles edge-case flat distributions
-            )
+            cross_comparison_record[f"{algo}_bin"] = cross_comparison_record[
+                f"R_diff"
+            ].map(lambda x: get_bin(x, bins=20))
 
         result = {}
         for referee, player in [(algoA, algoB), (algoB, algoA)]:
@@ -830,6 +828,7 @@ def evaluate(revlogs):
         "FSRSv3",
         "SM16",
         "SM17",
+        "LSTM",
         "AVG",
         "FSRS-6-default",
         "MOVING-AVG",
@@ -943,6 +942,11 @@ def evaluate(revlogs):
             ]
         ].rename(columns={"R (FSRS-6-default)": "p"})
     )
+    lstm_rmse = rmse_matrix(
+        revlogs[
+            ["card_id", "r_history", "t_history", "delta_t", "i", "y", "R (LSTM)"]
+        ].rename(columns={"R (LSTM)": "p"})
+    )
     avg_logloss = log_loss(revlogs["y"], revlogs["R (AVG)"])
     moving_avg_logloss = log_loss(revlogs["y"], revlogs["R (MOVING-AVG)"])
     adversarial_um_logloss = log_loss(revlogs["y"], revlogs["R (ADVERSARIAL-UM)"])
@@ -955,6 +959,7 @@ def evaluate(revlogs):
     fsrs_v4_logloss = log_loss(revlogs["y"], revlogs["R (FSRSv4)"])
     fsrs_v3_logloss = log_loss(revlogs["y"], revlogs["R (FSRSv3)"])
     fsrs_v6_default_logloss = log_loss(revlogs["y"], revlogs["R (FSRS-6-default)"])
+    lstm_logloss = log_loss(revlogs["y"], revlogs["R (LSTM)"])
 
     avg_auc = roc_auc_score(revlogs["y"], revlogs["R (AVG)"])
     moving_avg_auc = roc_auc_score(revlogs["y"], revlogs["R (MOVING-AVG)"])
@@ -968,6 +973,7 @@ def evaluate(revlogs):
     fsrs_v4_auc = roc_auc_score(revlogs["y"], revlogs["R (FSRSv4)"])
     fsrs_v3_auc = roc_auc_score(revlogs["y"], revlogs["R (FSRSv3)"])
     fsrs_v6_default_auc = roc_auc_score(revlogs["y"], revlogs["R (FSRS-6-default)"])
+    lstm_auc = roc_auc_score(revlogs["y"], revlogs["R (LSTM)"])
 
     result = {
         "FSRS-6": {
@@ -1004,6 +1010,11 @@ def evaluate(revlogs):
             "RMSE(bins)": round(sm17_rmse, 4),
             "LogLoss": round(sm17_logloss, 4),
             "AUC": round(sm17_auc, 4),
+        },
+        "LSTM": {
+            "RMSE(bins)": round(lstm_rmse, 4),
+            "LogLoss": round(lstm_logloss, 4),
+            "AUC": round(lstm_auc, 4),
         },
         "AVG": {
             "RMSE(bins)": round(avg_rmse, 4),
@@ -1057,6 +1068,7 @@ def process_single_file(file):
         revlogs = data_preprocessing(file)
         revlogs = average(revlogs)
         revlogs = moving_average(revlogs)
+        revlogs = run_lstm(revlogs)
         revlogs = FSRS6_default(revlogs)
         revlogs, trained_models = FSRS_old_train(revlogs)
         revlogs, model = FSRS_latest_train(revlogs)
@@ -1109,8 +1121,13 @@ if __name__ == "__main__":
     Path("result").mkdir(parents=True, exist_ok=True)
 
     # Get list of files to process
-    files = list(Path("dataset").glob("*.csv"))
-
+    # files = list(Path("dataset").glob("*.csv"))
+    files = sorted(
+        Path("dataset").glob("*.csv"),
+        key=lambda p: p.stat().st_size,
+        reverse=True,
+    )
+    # exit()
     # Create process pool
     with Pool() as pool:
         # Process files in parallel

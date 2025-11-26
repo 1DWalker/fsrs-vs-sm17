@@ -95,6 +95,7 @@ if __name__ == "__main__":
     FSRS_6_default = ("FSRS-6-default", [])
     SM17 = ("SM-17", [])
     SM16 = ("SM-16", [])
+    LSTM = ("LSTM", [])
     AVG = ("AVG", [])
     MOVING_AVG = ("MOVING-AVG", [])
     ADVERSARIAL_UM = ("ADVERSARIAL-UM", [])
@@ -113,6 +114,7 @@ if __name__ == "__main__":
             FSRS_6_default[1].append(result["FSRS-6-default"])
             SM17[1].append(result["SM17"])
             SM16[1].append(result["SM16"])
+            LSTM[1].append(result["LSTM"])
             AVG[1].append(result["AVG"])
             MOVING_AVG[1].append(result["MOVING-AVG"])
             sizes.append(result["size"])
@@ -141,6 +143,7 @@ if __name__ == "__main__":
         FSRSv4,
         SM17,
         SM16,
+        LSTM,
         FSRSv3,
         MOVING_AVG,
         FSRS_6_default,
@@ -302,12 +305,17 @@ if __name__ == "__main__":
 
         # Find best (lowest) Universal Metric+ per algorithm
         algorithm_um_plus_scores = {}
+        algorithm_um_plus_opponent_scores = {}
         for metric_name_plus, (_, _, wmean_plus) in um_plus_results.items():
             # Extract algorithm name: "FSRS-6_evaluated_by_SM16" → "FSRS-6"
             algo_name = metric_name_plus.split("_evaluated_by_")[0]
             if algo_name not in algorithm_um_plus_scores:
                 algorithm_um_plus_scores[algo_name] = []
             algorithm_um_plus_scores[algo_name].append(wmean_plus)
+            opp_algo_name = metric_name_plus.split("_evaluated_by_")[1]
+            if opp_algo_name not in algorithm_um_plus_opponent_scores:
+                algorithm_um_plus_opponent_scores[opp_algo_name] = []
+            algorithm_um_plus_opponent_scores[opp_algo_name].append(wmean_plus)
 
         # Average and Max Universal Metric+ per algorithm
         algo_avg_um_plus = {}
@@ -323,21 +331,22 @@ if __name__ == "__main__":
         )
 
         # Print Universal Metrics+ table
-        print("| Algorithm | UM+↓ (Max) | UM+↓ (Avg) |")
+        print("| Algorithm | UM+↓ (Max) | UM+↓ (Avg) | Opponent Score↑ |")
         print("| --- | --- | --- |")
         for i, (algo_name, max_um_plus) in enumerate(sorted_algorithms_plus):
             avg_um_plus = algo_avg_um_plus[algo_name]
 
             formatted_avg = f"{avg_um_plus:.4f}"
             formatted_max = f"{max_um_plus:.4f}"
+            formatted_opp_avg = f"{np.mean(algorithm_um_plus_opponent_scores[algo_name]):.4f}"
 
             if i == 0:
                 print(
-                    f"| **{algo_name}** | **{formatted_max}** | **{formatted_avg}** |"
+                    f"| **{algo_name}** | **{formatted_max}** | **{formatted_avg}** | **{formatted_opp_avg}** |"
                 )
             else:
                 print(
-                    f"| {algo_name} | {formatted_max} | {formatted_avg} |"
+                    f"| {algo_name} | {formatted_max} | {formatted_avg} | {formatted_opp_avg} |"
                 )
 
         print()

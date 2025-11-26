@@ -16,6 +16,7 @@ from fsrs_optimizer import (
 )
 import torch
 from torch import nn, Tensor
+from torch.optim.lr_scheduler import LinearLR
 
 class ResBlock(nn.Module):
     def __init__(self, module):
@@ -188,26 +189,28 @@ class LSTM(torch.nn.Module):
         )
 
 enable_experience_replay = True
-replay_steps = 512
-replay_size = 8192
+replay_size = int(1e9)
 batch_size = 512
 recency_weight = 6.49
 recency_degree = 2.4758
 
 def run_lstm(revlogs):
     device = torch.device("cpu")
-    model = LSTM(torch.load(f"./pretrain/LSTM.pth", weights_only=True, map_location=device))
-    opt = torch.optim.AdamW(model.parameters(), lr=1e9, weight_decay=1e9)
-    opt.load_state_dict(torch.load(f"./pretrain/LSTM_opt.pth", weights_only=True))
+    master_model = LSTM(torch.load(f"./pretrain/LSTM.pth", weights_only=True, map_location=device))
+    decay_model = LSTM(torch.load(f"./pretrain/LSTM.pth", weights_only=True, map_location=device))
+    master_opt = torch.optim.AdamW(master_model.parameters(), lr=1e9, weight_decay=1e9)
+    master_opt.load_state_dict(torch.load(f"./pretrain/LSTM_opt.pth", weights_only=True))
      # overwrite the weight decay
-    for param in opt.param_groups:
+    for param in master_opt.param_groups:
         param["weight_decay"] = 0.04855
         param["lr"] = 6e-3
+        param["betas"] = (0.9, 0.999)
         
     loss_fn = torch.nn.BCELoss(reduction="none")
     r = [np.nan for _ in range(len(revlogs))]
     queue = collections.deque(maxlen=replay_size)
 
+    next_train = 128
     for i in tqdm(range(len(revlogs))):
         row = revlogs.iloc[i]
         if row["i"] > 1:
@@ -224,16 +227,17 @@ def run_lstm(revlogs):
             seq_len = torch.tensor(row["next_tensor"].size(0), dtype=torch.long)
             delta_t = torch.tensor(row["next_delta_t"], dtype=torch.float).unsqueeze(0)
             with torch.no_grad():
-                model.eval()
-                output = model.batch_process(sequence, delta_t, seq_len, B)
+                decay_model.eval()
+                output = decay_model.batch_process(sequence, delta_t, seq_len, B)
             retention = output["retentions"]
             r[int(row["next_index"])] = retention.detach().numpy().round(3)[0]
 
-        if enable_experience_replay and len(queue) > 0 and (i + 1) % replay_steps == 0:
+        if enable_experience_replay and len(queue) > 0 and len(queue) % next_train == 0:
+            next_train = min(next_train + 4096, next_train * 2)
+
             # experience replay
             replay_buffer = pd.DataFrame(queue, columns=revlogs.columns)
             x = np.linspace(0, 1, len(replay_buffer))
-            replay_buffer["weights"] = 1.0 + 0.75 * np.power(x, 3)
             replay_buffer["weights"] = 1.0 + recency_weight * np.power(x, recency_degree)
             replay_buffer["weights"] *= len(replay_buffer) / replay_buffer["weights"].sum()
             replay_dataset = BatchDataset(
@@ -242,19 +246,45 @@ def run_lstm(revlogs):
             )  # avoid data leakage
             replay_dataloader = BatchLoader(replay_dataset, seed=42 + i)
             for j, batch in enumerate(replay_dataloader):
-                model.train()
-                opt.zero_grad()
+                master_model.train()
+                master_opt.zero_grad()
                 x, delta_ts, labels, seq_lens, weights = batch
                 L, B, _ = x.shape
                 assert B == seq_lens.size(0)
                 const = torch.full((L, B, 1), 5000, dtype=x.dtype, device=x.device)
                 sequences = torch.cat([x[..., :1], const, x[..., 1:]], dim=-1)
-                output = model.batch_process(sequences, delta_ts, seq_lens, B)
+                output = master_model.batch_process(sequences, delta_ts, seq_lens, B)
                 retentions = output["retentions"]
                 loss = (loss_fn(retentions, labels) * weights).sum()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 7050)
-                opt.step()
+                torch.nn.utils.clip_grad_norm_(master_model.parameters(), 7050)
+                master_opt.step()
 
+            decay_model.load_state_dict(master_model.state_dict())
+            decay_opt = torch.optim.AdamW(decay_model.parameters(), lr=1e9, weight_decay=1e9)
+            decay_opt.load_state_dict(master_opt.state_dict())
+            total_steps = len(replay_dataloader)
+            decay_scheduler = LinearLR(
+                decay_opt,
+                start_factor=0.5,     # multiplier = 1 → initial_lr
+                end_factor=0.0,       # multiplier = 0 → LR goes to zero
+                total_iters=total_steps
+            )
+            for j, batch in enumerate(replay_dataloader):
+                decay_model.train()
+                decay_opt.zero_grad()
+                x, delta_ts, labels, seq_lens, weights = batch
+                L, B, _ = x.shape
+                assert B == seq_lens.size(0)
+                const = torch.full((L, B, 1), 5000, dtype=x.dtype, device=x.device)
+                sequences = torch.cat([x[..., :1], const, x[..., 1:]], dim=-1)
+                output = decay_model.batch_process(sequences, delta_ts, seq_lens, B)
+                retentions = output["retentions"]
+                loss = (loss_fn(retentions, labels) * weights).sum()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(decay_model.parameters(), 7050)
+                decay_opt.step()
+                decay_scheduler.step()
+            
     revlogs["R (LSTM)"] = r
     return revlogs
