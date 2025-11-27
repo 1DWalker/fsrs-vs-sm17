@@ -151,6 +151,7 @@ def format(exponent, n):
 
 if __name__ == "__main__":
     models = (
+        "LSTM",
         "FSRS-6",
         "MOVING-AVG",
         "AVG",
