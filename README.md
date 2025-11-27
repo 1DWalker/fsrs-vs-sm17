@@ -89,7 +89,7 @@ This visualization helps identify which algorithms produce the most robust and a
 ### Universal Metric+
 
 | Algorithm | UM+↓ (Max) | UM+↓ (Avg) |
-| --- | --- | --- |
+| --- | --- | --- | --- |
 | **FSRS-6** | **0.0343** | **0.0302** |
 | FSRS-4.5 | 0.0692 | 0.0572 |
 | FSRS-5 | 0.0701 | 0.0578 |
